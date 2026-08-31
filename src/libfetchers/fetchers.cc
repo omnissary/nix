@@ -7,6 +7,7 @@
 #include "nix/util/json-utils.hh"
 #include "nix/fetchers/fetch-settings.hh"
 #include "nix/fetchers/fetch-to-store.hh"
+#include "nix/fetchers/nixignore.hh"
 #include "nix/util/url.hh"
 #include "nix/util/users.hh"
 #include "nix/store/pathlocks.hh"
@@ -23,6 +24,28 @@ static InputSchemeMap & inputSchemes()
 {
     static InputSchemeMap inputSchemeMap;
     return inputSchemeMap;
+}
+
+static void warnIfLegacyNixIgnore(const Input & input, ref<SourceAccessor> accessor)
+{
+    if (!experimentalFeatureSettings.isEnabled(Xp::Flakes) || !input.isFinal() || input.attrs.contains("nixIgnore"))
+        return;
+
+    auto type = maybeGetStrAttr(input.attrs, "type");
+    if (!type || (*type != "git" && *type != "path"))
+        return;
+
+    if (accessor->lstat(CanonPath::root).type != SourceAccessor::tDirectory)
+        return;
+
+    auto stat = accessor->maybeLstat(CanonPath(nixIgnoreFileName));
+    if (!stat || stat->type != SourceAccessor::tRegular)
+        return;
+
+    static bool warned = false;
+    warnOnce(
+        warned,
+        "ignoring '.nixignore' for a source pinned by an older lock entry; update the lock file to enable source filtering");
 }
 
 void registerInputScheme(std::shared_ptr<InputScheme> && inputScheme)
@@ -357,6 +380,8 @@ std::pair<ref<SourceAccessor>, Input> Input::getAccessorUnchecked(const Settings
 
             accessor->setPathDisplay("«" + to_string() + "»");
 
+            warnIfLegacyNixIgnore(*this, accessor);
+
             return {accessor, *this};
         } catch (Error & e) {
             debug("substitution of input '%s' failed: %s", to_string(), e.what());
@@ -379,6 +404,8 @@ std::pair<ref<SourceAccessor>, Input> Input::getAccessorUnchecked(const Settings
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
     auto [accessor, result] = scheme->getAccessor(settings, store, *this);
+
+    warnIfLegacyNixIgnore(*this, accessor);
 
     if (!accessor->fingerprint)
         accessor->fingerprint = result.getFingerprint(store);

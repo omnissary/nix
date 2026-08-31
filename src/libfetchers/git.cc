@@ -13,6 +13,7 @@
 #include "nix/fetchers/git-utils.hh"
 #include "nix/util/logging.hh"
 #include "nix/fetchers/fetch-settings.hh"
+#include "nix/fetchers/nixignore.hh"
 #include "nix/util/json-utils.hh"
 #include "nix/util/archive.hh"
 #include "nix/util/memo.hh"
@@ -190,7 +191,12 @@ struct GitInputScheme : InputScheme
         for (auto & [name, value] : url.query) {
             if (name == "rev" || name == "ref" || name == "keytype" || name == "publicKey" || name == "publicKeys")
                 attrs.emplace(name, value);
-            else if (
+            else if (name == "nixIgnore") {
+                auto version = string2Int<uint64_t>(value);
+                if (!version)
+                    throw BadURL("invalid nixIgnore version '%s'", value);
+                attrs.emplace(name, *version);
+            } else if (
                 name == "shallow" || name == "submodules" || name == "lfs" || name == "exportIgnore"
                 || name == "allRefs" || name == "verifyCommit")
                 attrs.emplace(name, Explicit<bool>{value == "1"});
@@ -324,6 +330,14 @@ struct GitInputScheme : InputScheme
                 {},
             },
             {
+                "nixIgnore",
+                {
+                    .type = "Integer",
+                    .required = false,
+                    .doc = "Version of the root `.nixignore` source filter. Only version 1 is supported.",
+                },
+            },
+            {
                 "lastModified",
                 {
                     .type = "Integer",
@@ -416,8 +430,10 @@ struct GitInputScheme : InputScheme
         input.attrs = attrs;
         input.attrs["url"] = fixGitURL(getStrAttr(attrs, "url")).to_string();
         getShallowAttr(input);
-        getSubmodulesAttr(input);
+        auto submodules = getSubmodulesAttr(input);
         getAllRefsAttr(input);
+        if (getNixIgnoreMode(input) == NixIgnoreMode::Required && submodules)
+            throw UnimplementedError("nixIgnore and submodules are not supported together yet");
         return input;
     }
 
@@ -438,6 +454,8 @@ struct GitInputScheme : InputScheme
             url.query.insert_or_assign("submodules", "1");
         if (maybeGetBoolAttr(input.attrs, "exportIgnore").value_or(false))
             url.query.insert_or_assign("exportIgnore", "1");
+        if (auto version = maybeGetIntAttr(input.attrs, "nixIgnore"))
+            url.query.insert_or_assign("nixIgnore", std::to_string(*version));
         if (maybeGetBoolAttr(input.attrs, "verifyCommit").value_or(false))
             url.query.insert_or_assign("verifyCommit", "1");
         auto publicKeys = getPublicKeys(input.attrs);
@@ -574,6 +592,8 @@ struct GitInputScheme : InputScheme
         /* Working directory info: the complete list of files, and
            whether the working directory is dirty compared to HEAD. */
         GitRepo::WorkdirInfo workdirInfo;
+
+        std::optional<NixIgnoreRules> nixIgnoreRules;
 
         std::string locationToArg() const
         {
@@ -721,8 +741,29 @@ struct GitInputScheme : InputScheme
 
         // If this is a local directory and no ref or revision is
         // given, then allow the use of an unclean working tree.
-        if (auto repoPath = repoInfo.getPath(); !input.getRef() && !input.getRev() && repoPath)
+        if (auto repoPath = repoInfo.getPath(); !input.getRef() && !input.getRev() && repoPath) {
             repoInfo.workdirInfo = GitRepo::getCachedWorkdirInfo(*repoPath);
+
+            auto mode = getNixIgnoreMode(input);
+            if (mode != NixIgnoreMode::Disabled) {
+                auto repo = GitRepo::openRepo(*repoPath, {});
+                ref<SourceAccessor> source = repo->getAccessor(
+                    repoInfo.workdirInfo, {.exportIgnore = getExportIgnoreAttr(input)}, makeNotAllowedError(*repoPath));
+                repoInfo.nixIgnoreRules = readNixIgnore(source, mode == NixIgnoreMode::Required);
+
+                if (repoInfo.nixIgnoreRules) {
+                    auto filter = [&](auto & files) {
+                        std::erase_if(files, [&](const CanonPath & file) {
+                            return repoInfo.nixIgnoreRules->match(file, SourceAccessor::tRegular).ignored;
+                        });
+                    };
+                    filter(repoInfo.workdirInfo.dirtyFiles);
+                    filter(repoInfo.workdirInfo.deletedFiles);
+                    repoInfo.workdirInfo.isDirty =
+                        !repoInfo.workdirInfo.dirtyFiles.empty() || !repoInfo.workdirInfo.deletedFiles.empty();
+                }
+            }
+        }
 
         return repoInfo;
     }
@@ -966,6 +1007,16 @@ struct GitInputScheme : InputScheme
         auto accessor = repo->getAccessor(
             rev, {.exportIgnore = exportIgnore, .smudgeLfs = smudgeLfs}, "«" + input.to_string() + "»");
 
+        auto mode = getNixIgnoreMode(input);
+        if (mode != NixIgnoreMode::Disabled) {
+            if (auto rules = readNixIgnore(accessor, mode == NixIgnoreMode::Required)) {
+                if (getSubmodulesAttr(input))
+                    throw UnimplementedError("nixIgnore and submodules are not supported together yet");
+                accessor = makeNixIgnoreSourceAccessor(accessor, std::move(*rules));
+                markNixIgnore(input);
+            }
+        }
+
         /* If the repo has submodules, fetch them and return a mounted
            input accessor consisting of the accessor for the top-level
            repo and the accessors for the submodules. */
@@ -1031,6 +1082,13 @@ struct GitInputScheme : InputScheme
 
         ref<SourceAccessor> accessor =
             repo->getAccessor(repoInfo.workdirInfo, {.exportIgnore = exportIgnore}, makeNotAllowedError(repoPath));
+
+        if (repoInfo.nixIgnoreRules) {
+            if (getSubmodulesAttr(input))
+                throw UnimplementedError("nixIgnore and submodules are not supported together yet");
+            accessor = makeNixIgnoreSourceAccessor(accessor, *repoInfo.nixIgnoreRules);
+            markNixIgnore(input);
+        }
 
         /* If the repo has submodules, return a mounted input accessor
            consisting of the accessor for the top-level repo and, per
@@ -1136,7 +1194,7 @@ struct GitInputScheme : InputScheme
     {
         auto makeFingerprint = [&](const Hash & rev) {
             return rev.gitRev() + (getSubmodulesAttr(input) ? ";s" : "") + (getExportIgnoreAttr(input) ? ";e" : "")
-                   + (getLfsAttr(input) ? ";l" : "");
+                   + (getLfsAttr(input) ? ";l" : "") + (maybeGetIntAttr(input.attrs, "nixIgnore") ? ";i=1" : "");
         };
 
         if (auto rev = input.getRev())

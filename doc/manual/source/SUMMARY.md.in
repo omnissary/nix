@@ -115,6 +115,7 @@
 {{#include ./command-ref/new-cli/SUMMARY.md}}
   - [Files](command-ref/files.md)
     - [nix.conf](command-ref/conf-file.md)
+    - [`.nixignore`](command-ref/files/nixignore.md)
     - [Profiles](command-ref/files/profiles.md)
       - [manifest.nix](command-ref/files/manifest.nix.md)
       - [manifest.json](command-ref/files/manifest.json.md)
