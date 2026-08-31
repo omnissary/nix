@@ -47,6 +47,7 @@ sources = files(
   'indirect.cc',
   'input-cache.cc',
   'mercurial.cc',
+  'nixignore.cc',
   'path.cc',
   'register-library-versions.cc',
   'registry.cc',

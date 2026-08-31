@@ -4,6 +4,7 @@
 #include "nix/fetchers/cache.hh"
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/fetchers/fetch-settings.hh"
+#include "nix/fetchers/nixignore.hh"
 
 namespace nix::fetchers {
 
@@ -24,7 +25,7 @@ struct PathInputScheme : InputScheme
         for (auto & [name, value] : url.query)
             if (name == "rev" || name == "narHash")
                 input.attrs.insert_or_assign(name, value);
-            else if (name == "revCount" || name == "lastModified") {
+            else if (name == "revCount" || name == "lastModified" || name == "nixIgnore") {
                 if (auto n = string2Int<uint64_t>(value))
                     input.attrs.insert_or_assign(name, *n);
                 else
@@ -32,6 +33,7 @@ struct PathInputScheme : InputScheme
             } else
                 throw Error("path URL '%s' has unsupported parameter '%s'", url, name);
 
+        getNixIgnoreMode(input);
         return input;
     }
 
@@ -74,6 +76,14 @@ struct PathInputScheme : InputScheme
                 "narHash",
                 {},
             },
+            {
+                "nixIgnore",
+                {
+                    .type = "Integer",
+                    .required = false,
+                    .doc = "Version of the root `.nixignore` source filter. Only version 1 is supported.",
+                },
+            },
         };
         return attrs;
     }
@@ -84,6 +94,7 @@ struct PathInputScheme : InputScheme
 
         Input input{};
         input.attrs = attrs;
+        getNixIgnoreMode(input);
         return input;
     }
 
@@ -153,7 +164,22 @@ struct PathInputScheme : InputScheme
             store.addTempRoot(*storePath);
 
         time_t mtime = 0;
-        if (!storePath || storePath->name() != "source" || !store.isValidPath(*storePath)) {
+        auto mode = getNixIgnoreMode(input);
+        auto source = makeFSSourceAccessor(absPath, /*trackLastModified=*/false);
+        std::optional<NixIgnoreRules> rules;
+        if (mode != NixIgnoreMode::Disabled) {
+            if (source->lstat(CanonPath::root).type == SourceAccessor::tDirectory)
+                rules = readNixIgnore(source, mode == NixIgnoreMode::Required);
+            else if (mode == NixIgnoreMode::Required)
+                throw Error("source declares nixIgnore version %d but is not a directory", nixIgnoreVersion);
+        }
+
+        if (rules) {
+            Activity act(*logger, lvlTalkative, actUnknown, fmt("copying %s to the store", PathFmt(absPath)));
+            source = makeNixIgnoreSourceAccessor(source, std::move(*rules));
+            storePath = store.addToStore("source", SourcePath(source));
+            markNixIgnore(input);
+        } else if (!storePath || storePath->name() != "source" || !store.isValidPath(*storePath)) {
             Activity act(*logger, lvlTalkative, actUnknown, fmt("copying %s to the store", PathFmt(absPath)));
             // FIXME: try to substitute storePath.
             auto src = sinkToSource(

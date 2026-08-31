@@ -49,6 +49,7 @@ sources = files(
   'git.cc',
   'input.cc',
   'nix_api_fetchers.cc',
+  'nixignore.cc',
   'public-key.cc',
 )
 

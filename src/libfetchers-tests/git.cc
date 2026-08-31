@@ -1,8 +1,10 @@
 #include "nix/store/globals.hh"
 #include "nix/store/dummy-store.hh"
+#include "nix/store/tests/libstore.hh"
 #include "nix/fetchers/fetch-settings.hh"
 #include "nix/fetchers/fetchers.hh"
 #include "nix/fetchers/git-utils.hh"
+#include "nix/fetchers/nixignore.hh"
 #include "nix/util/url.hh"
 
 #include <git2.h>
@@ -197,6 +199,68 @@ TEST_F(GitTest, submodulePeriodSupport)
     auto [accessor, i] = input.getAccessor(settings, *store);
 
     ASSERT_EQ(accessor->readFile(CanonPath("deps/sub/lib.txt")), "hello from submodule\n");
+}
+
+TEST_F(GitTest, nixIgnoreFiltersTrackedWorktreeAndDirtyState)
+{
+    EnableExperimentalFeature enableFlakes("flakes");
+    auto repoPath = tmpDir / "repo";
+
+    git_repository * raw = nullptr;
+    CHECK_LIBGIT(git_repository_init(&raw, repoPath.string().c_str(), /*is_bare=*/0));
+    RepoHandle repo(raw);
+    writeFile(repoPath / ".nixignore", "/secret/\n");
+    writeFile(repoPath / "visible", "public\n");
+    createDirs(repoPath / "secret");
+    writeFile(repoPath / "secret" / "value", "encrypted-at-rest, smudged-here\n");
+    commitAll(repo.get(), "initial");
+
+    auto cfg = make_ref<DummyStoreConfig>(StoreReference::Params{});
+    cfg->readOnly = false;
+    auto store = cfg->openStore();
+    auto settings = fetchers::Settings{};
+    auto input = fetchers::Input::fromAttrs({
+        {"url", "file://" + encodeUrlPath(pathToUrlPath(repoPath))},
+        {"type", "git"},
+    });
+
+    auto [accessor1, resolved1] = input.getAccessor(settings, *store);
+    EXPECT_EQ(accessor1->readFile(CanonPath("visible")), "public\n");
+    EXPECT_FALSE(accessor1->maybeLstat(CanonPath("secret")));
+    EXPECT_EQ(maybeGetIntAttr(resolved1.attrs, "nixIgnore"), nixIgnoreVersion);
+    auto fingerprint1 = resolved1.getFingerprint(*store);
+
+    writeFile(repoPath / "secret" / "value", "different decrypted value\n");
+    GitRepo::invalidateWorkdirInfoCache();
+    auto [accessor2, resolved2] = input.getAccessor(settings, *store);
+    EXPECT_FALSE(accessor2->maybeLstat(CanonPath("secret/value")));
+    EXPECT_EQ(resolved2.getFingerprint(*store), fingerprint1);
+    EXPECT_TRUE(resolved2.getRev());
+}
+
+TEST_F(GitTest, nixIgnoreFiltersPathInputBeforeStoreCopy)
+{
+    EnableExperimentalFeature enableFlakes("flakes");
+    auto sourcePath = tmpDir / "source";
+    createDirs(sourcePath / "secret");
+    writeFile(sourcePath / ".nixignore", "/secret/\n");
+    writeFile(sourcePath / "visible", "public\n");
+    writeFile(sourcePath / "secret" / "value", "private\n");
+
+    auto cfg = make_ref<DummyStoreConfig>(StoreReference::Params{});
+    cfg->readOnly = false;
+    auto store = cfg->openStore();
+    auto settings = fetchers::Settings{};
+    auto input = fetchers::Input::fromAttrs({
+        {"path", sourcePath.string()},
+        {"type", "path"},
+    });
+
+    auto [accessor, resolved] = input.getAccessor(settings, *store);
+    EXPECT_EQ(accessor->readFile(CanonPath("visible")), "public\n");
+    EXPECT_FALSE(accessor->maybeLstat(CanonPath("secret")));
+    EXPECT_EQ(maybeGetIntAttr(resolved.attrs, "nixIgnore"), nixIgnoreVersion);
+    EXPECT_EQ(resolved.getLastModified(), 0);
 }
 
 } // namespace nix::fetchers
