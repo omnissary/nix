@@ -81,7 +81,7 @@ struct PathInputScheme : InputScheme
                 {
                     .type = "Integer",
                     .required = false,
-                    .doc = "Version of the root `.nixignore` source filter. Only version 1 is supported.",
+                    .doc = "Version of root ignore-file source selection. Only version 1 is supported.",
                 },
             },
         };
@@ -104,6 +104,7 @@ struct PathInputScheme : InputScheme
         query.erase("path");
         query.erase("type");
         query.erase("__final");
+        query.erase(std::string(nixIgnoreDiscoverAttr));
         return ParsedURL{
             .scheme = "path",
             .path = pathToUrlPath(std::filesystem::path{getStrAttr(input.attrs, "path")}),
@@ -122,7 +123,18 @@ struct PathInputScheme : InputScheme
         std::string_view contents,
         std::optional<std::string> commitMsg) const override
     {
-        writeFile(getAbsPath(input) / path.rel(), contents);
+        auto root = getAbsPath(input);
+        auto dotGit = root / ".git";
+        if (commitMsg && (pathExists(dotGit / "HEAD") || std::filesystem::is_regular_file(dotGit))) {
+            auto gitInput = Input::fromAttrs({
+                {"type", "git"},
+                {"url", root.string()},
+            });
+            gitInput.putFile(path, contents, std::move(commitMsg));
+            return;
+        }
+
+        writeFile(root / path.rel(), contents);
     }
 
     std::optional<std::filesystem::path> isRelative(const Input & input) const override
@@ -166,25 +178,32 @@ struct PathInputScheme : InputScheme
         time_t mtime = 0;
         auto mode = getNixIgnoreMode(input);
         auto source = makeFSSourceAccessor(absPath, /*trackLastModified=*/false);
-        std::optional<NixIgnoreRules> rules;
-        if (mode != NixIgnoreMode::Disabled) {
-            if (source->lstat(CanonPath::root).type == SourceAccessor::tDirectory)
-                rules = readNixIgnore(source, mode == NixIgnoreMode::Required);
-            else if (mode == NixIgnoreMode::Required)
-                throw Error("source declares nixIgnore version %d but is not a directory", nixIgnoreVersion);
-        }
-
-        if (rules) {
+        if (mode != NixIgnoreMode::Disabled && source->lstat(CanonPath::root).type == SourceAccessor::tDirectory) {
+            auto filter = readNixIgnore(source);
             Activity act(*logger, lvlTalkative, actUnknown, fmt("copying %s to the store", PathFmt(absPath)));
-            source = makeNixIgnoreSourceAccessor(source, std::move(*rules));
-            storePath = store.addToStore("source", SourcePath(source));
-            markNixIgnore(input);
-        } else if (!storePath || storePath->name() != "source" || !store.isValidPath(*storePath)) {
-            Activity act(*logger, lvlTalkative, actUnknown, fmt("copying %s to the store", PathFmt(absPath)));
-            // FIXME: try to substitute storePath.
-            auto src = sinkToSource(
-                [&](Sink & sink) { mtime = dumpPathAndGetMtime(absPath.string(), sink, defaultPathFilter); });
+            PathFilter pathFilter = [&](const std::string & path) {
+                CanonPath canonPath(path);
+                auto st = std::filesystem::symlink_status(absPath / canonPath.rel());
+                auto type = std::filesystem::is_directory(st)      ? SourceAccessor::tDirectory
+                            : std::filesystem::is_regular_file(st) ? SourceAccessor::tRegular
+                            : std::filesystem::is_symlink(st)      ? SourceAccessor::tSymlink
+                                                                   : SourceAccessor::tUnknown;
+                return !filter.match(canonPath, type).ignored;
+            };
+            auto src = sinkToSource([&](Sink & sink) { mtime = dumpPathAndGetMtime(absPath, sink, pathFilter); });
             storePath = store.addToStoreFromDump(*src, "source");
+            markNixIgnore(input);
+        } else {
+            if (mode == NixIgnoreMode::Required)
+                throw Error("source declares nixIgnore version %d but is not a directory", nixIgnoreVersion);
+            input.attrs.erase(std::string(nixIgnoreDiscoverAttr));
+            if (!storePath || storePath->name() != "source" || !store.isValidPath(*storePath)) {
+                Activity act(*logger, lvlTalkative, actUnknown, fmt("copying %s to the store", PathFmt(absPath)));
+                // FIXME: try to substitute storePath.
+                auto src = sinkToSource(
+                    [&](Sink & sink) { mtime = dumpPathAndGetMtime(absPath.string(), sink, defaultPathFilter); });
+                storePath = store.addToStoreFromDump(*src, "source");
+            }
         }
 
         auto accessor = store.requireStoreObjectAccessor(*storePath);

@@ -220,6 +220,7 @@ TEST_F(GitTest, nixIgnoreFiltersTrackedWorktreeAndDirtyState)
     auto store = cfg->openStore();
     auto settings = fetchers::Settings{};
     auto input = fetchers::Input::fromAttrs({
+        {"nixIgnore", nixIgnoreVersion},
         {"url", "file://" + encodeUrlPath(pathToUrlPath(repoPath))},
         {"type", "git"},
     });
@@ -252,6 +253,7 @@ TEST_F(GitTest, nixIgnoreFiltersPathInputBeforeStoreCopy)
     auto store = cfg->openStore();
     auto settings = fetchers::Settings{};
     auto input = fetchers::Input::fromAttrs({
+        {"nixIgnore", nixIgnoreVersion},
         {"path", sourcePath.string()},
         {"type", "path"},
     });
@@ -260,7 +262,8 @@ TEST_F(GitTest, nixIgnoreFiltersPathInputBeforeStoreCopy)
     EXPECT_EQ(accessor->readFile(CanonPath("visible")), "public\n");
     EXPECT_FALSE(accessor->maybeLstat(CanonPath("secret")));
     EXPECT_EQ(maybeGetIntAttr(resolved.attrs, "nixIgnore"), nixIgnoreVersion);
-    EXPECT_EQ(resolved.getLastModified(), 0);
+    ASSERT_TRUE(resolved.getLastModified());
+    EXPECT_GT(*resolved.getLastModified(), 0);
 }
 
 } // namespace nix::fetchers

@@ -2,9 +2,9 @@
 
 #include "nix/fetchers/filtering-source-accessor.hh"
 
+#include <array>
 #include <cstdint>
 #include <optional>
-#include <regex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,6 +15,12 @@ class Input;
 
 inline constexpr std::string_view nixIgnoreFileName = ".nixignore";
 inline constexpr uint64_t nixIgnoreVersion = 1;
+inline constexpr std::string_view nixIgnoreDiscoverAttr = "__nixIgnoreDiscover";
+inline constexpr std::array<std::string_view, 3> nixIgnoreFileNames{
+    nixIgnoreFileName,
+    ".ignore",
+    ".gitignore",
+};
 
 enum class NixIgnoreMode {
     Disabled,
@@ -22,8 +28,11 @@ enum class NixIgnoreMode {
     Required,
 };
 
-/** Decide whether an input should discover or require `.nixignore`. */
+/** Decide whether an input should use the versioned source filter. */
 NixIgnoreMode getNixIgnoreMode(const Input & input);
+
+/** Enable source-filter discovery without adding a public input attribute. */
+void discoverNixIgnore(Input & input);
 
 /** Record the matcher version in a resolved input. */
 void markNixIgnore(Input & input);
@@ -42,10 +51,8 @@ class NixIgnoreRules
         bool negated;
         bool directoryOnly;
         bool anchored;
-        bool valid;
         size_t line;
         std::string text;
-        std::regex regex;
     };
 
     std::vector<Rule> rules;
@@ -63,10 +70,18 @@ public:
     Match match(const CanonPath & path, SourceAccessor::Type type) const;
 };
 
-/** Read and compile `.nixignore`, if it exists in `source`. */
-std::optional<NixIgnoreRules> readNixIgnore(ref<SourceAccessor> source, bool required = false);
+struct NixIgnoreFilter
+{
+    std::optional<CanonPath> sourceFile;
+    NixIgnoreRules rules;
+
+    NixIgnoreRules::Match match(const CanonPath & path, SourceAccessor::Type type) const;
+};
+
+/** Select and compile the first root ignore file, if one exists. */
+NixIgnoreFilter readNixIgnore(ref<SourceAccessor> source);
 
 /** Wrap `source` so ignored paths are inaccessible and omitted from directory listings. */
-ref<SourceAccessor> makeNixIgnoreSourceAccessor(ref<SourceAccessor> source, NixIgnoreRules rules);
+ref<SourceAccessor> makeNixIgnoreSourceAccessor(ref<SourceAccessor> source, NixIgnoreFilter filter);
 
 } // namespace nix::fetchers
