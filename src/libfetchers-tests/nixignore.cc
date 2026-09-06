@@ -78,17 +78,29 @@ TEST(NixIgnoreRules, matchingIsCaseSensitive)
     EXPECT_FALSE(ignored(rules, "secret"));
 }
 
-TEST(NixIgnoreMode, preservesLegacyFinalInputsAndVersionsNewOnes)
+TEST(NixIgnoreMode, onlyEnablesExplicitAndDiscoveredInputs)
 {
-    EnableExperimentalFeature enableFlakes("flakes");
     Input input;
+    input.attrs.insert_or_assign("type", "path");
+    EXPECT_EQ(getNixIgnoreMode(input), NixIgnoreMode::Disabled);
+
+    discoverNixIgnore(input);
     EXPECT_EQ(getNixIgnoreMode(input), NixIgnoreMode::Discover);
 
     input.attrs.insert_or_assign("__final", Explicit<bool>{true});
-    EXPECT_EQ(getNixIgnoreMode(input), NixIgnoreMode::Disabled);
-
-    input.attrs.insert_or_assign("nixIgnore", nixIgnoreVersion);
+    markNixIgnore(input);
     EXPECT_EQ(getNixIgnoreMode(input), NixIgnoreMode::Required);
+
+    Input legacyFinal;
+    legacyFinal.attrs.insert_or_assign("type", "path");
+    legacyFinal.attrs.insert_or_assign("__final", Explicit<bool>{true});
+    discoverNixIgnore(legacyFinal);
+    EXPECT_EQ(getNixIgnoreMode(legacyFinal), NixIgnoreMode::Disabled);
+
+    Input unrelated;
+    unrelated.attrs.insert_or_assign("type", "tarball");
+    discoverNixIgnore(unrelated);
+    EXPECT_EQ(getNixIgnoreMode(unrelated), NixIgnoreMode::Disabled);
 
     input.attrs.insert_or_assign("nixIgnore", uint64_t(2));
     EXPECT_THROW(getNixIgnoreMode(input), Error);
@@ -101,9 +113,8 @@ TEST(NixIgnoreSourceAccessor, filtersDirectoryAndDirectAccess)
     source->addFile(CanonPath("visible"), std::string("ok"));
     source->addFile(CanonPath("secret/value"), std::string("do not read"));
 
-    auto rules = readNixIgnore(source);
-    ASSERT_TRUE(rules);
-    auto filtered = makeNixIgnoreSourceAccessor(source, std::move(*rules));
+    auto filter = readNixIgnore(source);
+    auto filtered = makeNixIgnoreSourceAccessor(source, std::move(filter));
 
     auto entries = filtered->readDirectory(CanonPath::root);
     EXPECT_TRUE(entries.contains(".nixignore"));
@@ -111,6 +122,30 @@ TEST(NixIgnoreSourceAccessor, filtersDirectoryAndDirectAccess)
     EXPECT_FALSE(entries.contains("secret"));
     EXPECT_FALSE(filtered->pathExists(CanonPath("secret/value")));
     EXPECT_THROW(filtered->readFile(CanonPath("secret/value")), RestrictedPathError);
+}
+
+TEST(NixIgnoreSourceAccessor, usesPolicyFilePrecedenceAndExcludesVcsMetadata)
+{
+    auto source = make_ref<MemorySourceAccessor>();
+    source->addFile(CanonPath(".nixignore"), std::string("from-nixignore\n"));
+    source->addFile(CanonPath(".ignore"), std::string("from-ignore\n"));
+    source->addFile(CanonPath(".gitignore"), std::string("from-gitignore\n"));
+    source->addFile(CanonPath("from-nixignore"), std::string("excluded"));
+    source->addFile(CanonPath("from-ignore"), std::string("included"));
+    source->addFile(CanonPath(".git/config"), std::string("excluded"));
+
+    auto filter = readNixIgnore(source);
+    ASSERT_EQ(filter.sourceFile, CanonPath(".nixignore"));
+    EXPECT_TRUE(filter.match(CanonPath("from-nixignore"), SourceAccessor::tRegular).ignored);
+    EXPECT_FALSE(filter.match(CanonPath("from-ignore"), SourceAccessor::tRegular).ignored);
+    EXPECT_TRUE(filter.match(CanonPath(".git/config"), SourceAccessor::tRegular).ignored);
+}
+
+TEST(NixIgnoreRules, supportsPosixCharacterClasses)
+{
+    auto rules = NixIgnoreRules::parse("file[[:digit:]].txt\n");
+    EXPECT_TRUE(ignored(rules, "file7.txt"));
+    EXPECT_FALSE(ignored(rules, "filex.txt"));
 }
 
 TEST(NixIgnoreSourceAccessor, rejectsSelfExclusion)

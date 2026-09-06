@@ -157,7 +157,7 @@ expect 1 nix build -o "$TEST_ROOT/result" "$flake2Dir#bar" --no-update-lock-file
 nix build -o "$TEST_ROOT/result" "$flake2Dir#bar" --commit-lock-file
 [[ -e "$flake2Dir/flake.lock" ]]
 [[ -z $(git -C "$flake2Dir" diff main || echo failed) ]]
-[[ $(jq --indent 0 --compact-output . < "$flake2Dir/flake.lock") =~ ^'{"nodes":{"flake1":{"locked":{"lastModified":'.*',"narHash":"sha256-'.*'","ref":"refs/heads/master","rev":"'.*'","revCount":2,"type":"git","url":"file:///'.*'"},"original":{"id":"flake1","type":"indirect"}},"root":{"inputs":{"flake1":"flake1"}}},"root":"root","version":7}'$ ]]
+[[ $(jq --indent 0 --compact-output . < "$flake2Dir/flake.lock") =~ ^'{"nodes":{"flake1":{"locked":{"lastModified":'.*',"narHash":"sha256-'.*'","nixIgnore":1,"ref":"refs/heads/master","rev":"'.*'","revCount":2,"type":"git","url":"file:///'.*'"},"original":{"id":"flake1","type":"indirect"}},"root":{"inputs":{"flake1":"flake1"}}},"root":"root","version":7}'$ ]]
 
 # Rerunning the build should not change the lockfile.
 nix build -o "$TEST_ROOT/result" "$flake2Dir#bar"
@@ -454,8 +454,8 @@ nix flake metadata "$flake2Dir" --reference-lock-file "$TEST_ROOT"/flake2-overri
 expectStderr 1 nix flake metadata "$flake2Dir" --no-allow-dirty --reference-lock-file "$TEST_ROOT"/flake2-overridden.lock
 
 # After changing an input (flake2 from newFlake2Rev to prevFlake2Rev), we should have the transitive inputs locked by revision $prevFlake2Rev of flake2.
-prevFlake1Rev=$(nix flake metadata --json "$flake1Dir" | jq -r .revision)
-prevFlake2Rev=$(nix flake metadata --json "$flake2Dir" | jq -r .revision)
+prevFlake1Rev=$(nix flake metadata --json "git+file://$flake1Dir" | jq -r .revision)
+prevFlake2Rev=$(nix flake metadata --json "git+file://$percentEncodedFlake2Dir" | jq -r .revision)
 
 echo "# bla" >> "$flake1Dir/flake.nix"
 git -C "$flake1Dir" commit flake.nix -m 'bla'
@@ -463,8 +463,8 @@ git -C "$flake1Dir" commit flake.nix -m 'bla'
 nix flake update --flake "$flake2Dir"
 git -C "$flake2Dir" commit flake.lock -m 'bla'
 
-newFlake1Rev=$(nix flake metadata --json "$flake1Dir" | jq -r .revision)
-newFlake2Rev=$(nix flake metadata --json "$flake2Dir" | jq -r .revision)
+newFlake1Rev=$(nix flake metadata --json "git+file://$flake1Dir" | jq -r .revision)
+newFlake2Rev=$(nix flake metadata --json "git+file://$percentEncodedFlake2Dir" | jq -r .revision)
 
 cat > "$flake3Dir/flake.nix" <<EOF
 {

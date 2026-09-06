@@ -1,6 +1,8 @@
 #include <assert.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <ostream>
 #include <string_view>
@@ -22,6 +24,7 @@
 #include "nix/util/strings.hh"
 #include "nix/util/util.hh"
 #include "nix/fetchers/attrs.hh"
+#include "nix/fetchers/nixignore.hh"
 #include "nix/fetchers/registry.hh"
 #include "nix/store/outputs-spec.hh"
 #include "nix/util/ref.hh"
@@ -114,12 +117,20 @@ std::pair<FlakeRef, std::string> parsePathFlakeRefWithFragment(
 
     if (baseDir) {
         /* Check if 'url' is a path (either absolute or relative
-           to 'baseDir'). If so, search upward to the root of the
-           repo. */
+           to 'baseDir'). If so, find the containing flake and use
+           the nearest VCS root as its source boundary. */
 
         path = absPath(path, get(baseDir), true);
 
         if (isFlake) {
+            auto isGitRoot = [](const std::filesystem::path & candidate) {
+                auto dotGit = candidate / ".git";
+                return pathExists(dotGit / "HEAD") || (pathExists(dotGit) && S_ISREG(lstat(dotGit).st_mode));
+            };
+            auto isVcsRoot = [&](const std::filesystem::path & candidate) {
+                return isGitRoot(candidate) || pathExists(candidate / ".hg" / "requires")
+                       || pathExists(candidate / ".jj" / "repo");
+            };
 
             if (!S_ISDIR(lstat(path).st_mode)) {
                 if (path.filename() == "flake.nix") {
@@ -146,7 +157,7 @@ std::pair<FlakeRef, std::string> parsePathFlakeRefWithFragment(
                     if (pathExists(path / "flake.nix")) {
                         found = true;
                         break;
-                    } else if (fetchers::getLocalRepoURL(path))
+                    } else if (isVcsRoot(path))
                         throw Error(
                             "path %s is not part of a flake (neither it nor its parent directories contain a 'flake.nix' file)",
                             PathFmt(path));
@@ -168,20 +179,48 @@ std::pair<FlakeRef, std::string> parsePathFlakeRefWithFragment(
             std::string subdir;
 
             while (flakeRoot.parent_path() != flakeRoot) {
-                if (auto repoURL = fetchers::getLocalRepoURL(flakeRoot)) {
-                    auto parsedURL = std::move(*repoURL);
-                    auto schemeQuery = std::move(parsedURL.query);
-                    parsedURL.query = query;
-                    parsedURL.fragment = fragment;
+                if (isVcsRoot(flakeRoot)) {
+                    static constexpr std::array<std::string_view, 11> gitQueryAttrs{
+                        "ref",
+                        "rev",
+                        "shallow",
+                        "submodules",
+                        "lfs",
+                        "exportIgnore",
+                        "allRefs",
+                        "verifyCommit",
+                        "keytype",
+                        "publicKey",
+                        "publicKeys",
+                    };
+                    bool requestsGit = isGitRoot(flakeRoot) && std::ranges::any_of(gitQueryAttrs, [&](auto attr) {
+                                           return query.contains(std::string(attr));
+                                       });
 
-                    if (subdir != "") {
-                        if (parsedURL.query.count("dir"))
-                            throw Error("flake URL '%s' has an inconsistent 'dir' parameter", url);
-                        parsedURL.query.insert_or_assign("dir", subdir);
+                    ParsedURL parsedURL;
+                    if (requestsGit) {
+                        parsedURL = *fetchers::getLocalRepoURL(flakeRoot);
+                        auto schemeQuery = std::move(parsedURL.query);
+                        parsedURL.query = query;
+                        parsedURL.fragment = fragment;
+                        for (auto & [name, value] : schemeQuery)
+                            parsedURL.query.insert_or_assign(name, value);
+                    } else {
+                        parsedURL = ParsedURL{
+                            .scheme = "path",
+                            .authority = ParsedURL::Authority{},
+                            .path = pathToUrlPath(flakeRoot),
+                            .query = query,
+                            .fragment = fragment,
+                        };
                     }
 
-                    for (auto & [name, value] : schemeQuery)
-                        parsedURL.query.insert_or_assign(name, value);
+                    if (subdir != "") {
+                        if (auto explicitDir = get(parsedURL.query, "dir"))
+                            parsedURL.query.insert_or_assign("dir", subdir + "/" + *explicitDir);
+                        else
+                            parsedURL.query.insert_or_assign("dir", subdir);
+                    }
 
                     return fromParsedURL(std::move(parsedURL), isFlake);
                 }
@@ -288,7 +327,9 @@ FlakeRef FlakeRef::fromAttrs(const fetchers::Attrs & attrs)
 std::pair<ref<SourceAccessor>, FlakeRef>
 FlakeRef::lazyFetch(const fetchers::Settings & fetchSettings, Store & store) const
 {
-    auto [accessor, lockedInput] = input.getAccessor(fetchSettings, store);
+    auto sourceInput = input;
+    fetchers::discoverNixIgnore(sourceInput);
+    auto [accessor, lockedInput] = sourceInput.getAccessor(fetchSettings, store);
     return {accessor, FlakeRef(std::move(lockedInput), subdir)};
 }
 
