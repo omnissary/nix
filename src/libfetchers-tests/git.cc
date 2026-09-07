@@ -37,7 +37,7 @@ using SubmoduleHandle = Handle<git_submodule, git_submodule_free>;
 
 #define CHECK_LIBGIT(expr) ASSERT_TRUE((expr) >= 0) << git_error_last()
 
-static void commitAll(git_repository * repo, const char * msg)
+static void commitAll(git_repository * repo, const char * msg, unsigned int addFlags = 0)
 {
     IndexHandle idx;
     {
@@ -45,7 +45,7 @@ static void commitAll(git_repository * repo, const char * msg)
         CHECK_LIBGIT(git_repository_index(&raw, repo));
         idx.reset(raw);
     }
-    CHECK_LIBGIT(git_index_add_all(idx.get(), nullptr, 0, nullptr, nullptr));
+    CHECK_LIBGIT(git_index_add_all(idx.get(), nullptr, addFlags, nullptr, nullptr));
     CHECK_LIBGIT(git_index_write(idx.get()));
 
     git_oid treeId{};
@@ -264,6 +264,38 @@ TEST_F(GitTest, nixIgnoreFiltersPathInputBeforeStoreCopy)
     EXPECT_EQ(maybeGetIntAttr(resolved.attrs, "nixIgnore"), nixIgnoreVersion);
     ASSERT_TRUE(resolved.getLastModified());
     EXPECT_GT(*resolved.getLastModified(), 0);
+}
+
+TEST_F(GitTest, nixIgnoreKeepsTrackedFilesMatchingGitIgnore)
+{
+    EnableExperimentalFeature enableFlakes("flakes");
+    auto repoPath = tmpDir / "forced";
+
+    git_repository * raw = nullptr;
+    CHECK_LIBGIT(git_repository_init(&raw, repoPath.string().c_str(), /*is_bare=*/0));
+    RepoHandle repo(raw);
+    writeFile(repoPath / ".gitignore", "generated\n");
+    writeFile(repoPath / "generated", "tracked in spite of .gitignore\n");
+    commitAll(repo.get(), "initial", GIT_INDEX_ADD_FORCE);
+
+    auto cfg = make_ref<DummyStoreConfig>(StoreReference::Params{});
+    cfg->readOnly = false;
+    auto store = cfg->openStore();
+    auto settings = fetchers::Settings{};
+    auto attrs = fetchers::Attrs{
+        {"nixIgnore", nixIgnoreVersion},
+        {"url", "file://" + encodeUrlPath(pathToUrlPath(repoPath))},
+        {"type", "git"},
+    };
+
+    auto [workdirAccessor, workdirInput] = fetchers::Input::fromAttrs(fetchers::Attrs(attrs)).getAccessor(settings, *store);
+    EXPECT_TRUE(workdirAccessor->maybeLstat(CanonPath("generated")));
+
+    auto rev = workdirInput.getRev();
+    ASSERT_TRUE(rev);
+    attrs.insert_or_assign("rev", rev->gitRev());
+    auto [revAccessor, revInput] = fetchers::Input::fromAttrs(std::move(attrs)).getAccessor(settings, *store);
+    EXPECT_TRUE(revAccessor->maybeLstat(CanonPath("generated")));
 }
 
 } // namespace nix::fetchers

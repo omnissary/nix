@@ -22,7 +22,8 @@ void warnIfLegacySourceSelection(
     if (accessor->lstat(CanonPath::root).type != SourceAccessor::tDirectory)
         return;
 
-    for (auto name : nixIgnoreFileNames) {
+    for (auto name : *type == "git" ? std::span<const std::string_view>(vcsNixIgnoreFileNames)
+                                    : std::span<const std::string_view>(nixIgnoreFileNames)) {
         auto stat = accessor->maybeLstat(CanonPath(name));
         if (!stat || stat->type != SourceAccessor::tRegular)
             continue;

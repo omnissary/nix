@@ -1,8 +1,6 @@
 #include <assert.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <algorithm>
-#include <array>
 #include <filesystem>
 #include <ostream>
 #include <string_view>
@@ -179,41 +177,13 @@ std::pair<FlakeRef, std::string> parsePathFlakeRefWithFragment(
             std::string subdir;
 
             while (flakeRoot.parent_path() != flakeRoot) {
-                if (isVcsRoot(flakeRoot)) {
-                    static constexpr std::array<std::string_view, 11> gitQueryAttrs{
-                        "ref",
-                        "rev",
-                        "shallow",
-                        "submodules",
-                        "lfs",
-                        "exportIgnore",
-                        "allRefs",
-                        "verifyCommit",
-                        "keytype",
-                        "publicKey",
-                        "publicKeys",
-                    };
-                    bool requestsGit = isGitRoot(flakeRoot) && std::ranges::any_of(gitQueryAttrs, [&](auto attr) {
-                                           return query.contains(std::string(attr));
-                                       });
-
-                    ParsedURL parsedURL;
-                    if (requestsGit) {
-                        parsedURL = *fetchers::getLocalRepoURL(flakeRoot);
-                        auto schemeQuery = std::move(parsedURL.query);
-                        parsedURL.query = query;
-                        parsedURL.fragment = fragment;
-                        for (auto & [name, value] : schemeQuery)
-                            parsedURL.query.insert_or_assign(name, value);
-                    } else {
-                        parsedURL = ParsedURL{
-                            .scheme = "path",
-                            .authority = ParsedURL::Authority{},
-                            .path = pathToUrlPath(flakeRoot),
-                            .query = query,
-                            .fragment = fragment,
-                        };
-                    }
+                if (isGitRoot(flakeRoot)) {
+                    auto parsedURL = *fetchers::getLocalRepoURL(flakeRoot);
+                    auto schemeQuery = std::move(parsedURL.query);
+                    parsedURL.query = query;
+                    parsedURL.fragment = fragment;
+                    for (auto & [name, value] : schemeQuery)
+                        parsedURL.query.insert_or_assign(name, value);
 
                     if (subdir != "") {
                         if (auto explicitDir = get(parsedURL.query, "dir"))

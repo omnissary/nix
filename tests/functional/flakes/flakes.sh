@@ -454,8 +454,8 @@ nix flake metadata "$flake2Dir" --reference-lock-file "$TEST_ROOT"/flake2-overri
 expectStderr 1 nix flake metadata "$flake2Dir" --no-allow-dirty --reference-lock-file "$TEST_ROOT"/flake2-overridden.lock
 
 # After changing an input (flake2 from newFlake2Rev to prevFlake2Rev), we should have the transitive inputs locked by revision $prevFlake2Rev of flake2.
-prevFlake1Rev=$(nix flake metadata --json "git+file://$flake1Dir" | jq -r .revision)
-prevFlake2Rev=$(nix flake metadata --json "git+file://$percentEncodedFlake2Dir" | jq -r .revision)
+prevFlake1Rev=$(nix flake metadata --json "$flake1Dir" | jq -r .revision)
+prevFlake2Rev=$(nix flake metadata --json "$flake2Dir" | jq -r .revision)
 
 echo "# bla" >> "$flake1Dir/flake.nix"
 git -C "$flake1Dir" commit flake.nix -m 'bla'
@@ -463,8 +463,8 @@ git -C "$flake1Dir" commit flake.nix -m 'bla'
 nix flake update --flake "$flake2Dir"
 git -C "$flake2Dir" commit flake.lock -m 'bla'
 
-newFlake1Rev=$(nix flake metadata --json "git+file://$flake1Dir" | jq -r .revision)
-newFlake2Rev=$(nix flake metadata --json "git+file://$percentEncodedFlake2Dir" | jq -r .revision)
+newFlake1Rev=$(nix flake metadata --json "$flake1Dir" | jq -r .revision)
+newFlake2Rev=$(nix flake metadata --json "$flake2Dir" | jq -r .revision)
 
 cat > "$flake3Dir/flake.nix" <<EOF
 {
