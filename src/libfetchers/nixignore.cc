@@ -1,36 +1,11 @@
 #include "nix/fetchers/nixignore.hh"
 
-#include "nix/fetchers/fetchers.hh"
 #include "nix/util/configuration.hh"
 #include "nix/util/strings.hh"
 
 #include <unordered_map>
 
 namespace nix::fetchers {
-
-NixIgnoreMode getNixIgnoreMode(const Input & input)
-{
-    if (auto version = maybeGetIntAttr(input.attrs, "nixIgnore")) {
-        if (*version != nixIgnoreVersion)
-            throw Error("unsupported nixIgnore version %d (only version %d is supported)", *version, nixIgnoreVersion);
-        return NixIgnoreMode::Required;
-    }
-
-    return input.attrs.contains(std::string(nixIgnoreDiscoverAttr)) ? NixIgnoreMode::Discover : NixIgnoreMode::Disabled;
-}
-
-void discoverNixIgnore(Input & input)
-{
-    auto type = maybeGetStrAttr(input.attrs, "type");
-    if (type && (*type == "git" || *type == "path") && !input.isFinal() && !input.attrs.contains("nixIgnore"))
-        input.attrs.insert_or_assign(std::string(nixIgnoreDiscoverAttr), Explicit<bool>(true));
-}
-
-void markNixIgnore(Input & input)
-{
-    input.attrs.erase(std::string(nixIgnoreDiscoverAttr));
-    input.attrs.insert_or_assign("nixIgnore", nixIgnoreVersion);
-}
 
 namespace {
 
@@ -362,25 +337,18 @@ NixIgnoreRules::Match NixIgnoreFilter::match(const CanonPath & path, SourceAcces
     return rules.match(path, type);
 }
 
-NixIgnoreFilter readNixIgnore(ref<SourceAccessor> source, std::span<const std::string_view> fileNames)
+std::optional<NixIgnoreFilter> readNixIgnore(ref<SourceAccessor> source)
 {
-    NixIgnoreFilter result;
+    CanonPath path{nixIgnoreFileName};
+    auto stat = source->maybeLstat(path);
+    if (!stat)
+        return std::nullopt;
+    if (stat->type != SourceAccessor::tRegular)
+        throw Error("'%s' must be a regular file", nixIgnoreFileName);
 
-    for (auto name : fileNames) {
-        CanonPath path(name);
-        auto stat = source->maybeLstat(path);
-        if (!stat)
-            continue;
-        if (stat->type != SourceAccessor::tRegular)
-            throw Error("'%s' must be a regular file", name);
-
-        result.sourceFile = path;
-        result.rules = NixIgnoreRules::parse(source->readFile(path));
-        if (auto match = result.match(path, SourceAccessor::tRegular); match.ignored)
-            throw Error("'%s' excludes itself at line %d", name, match.line.value_or(0));
-        break;
-    }
-
+    NixIgnoreFilter result{.rules = NixIgnoreRules::parse(source->readFile(path))};
+    if (auto match = result.match(path, SourceAccessor::tRegular); match.ignored)
+        throw Error("'%s' excludes itself at line %d", nixIgnoreFileName, match.line.value_or(0));
     return result;
 }
 

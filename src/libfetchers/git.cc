@@ -186,12 +186,7 @@ struct GitInputScheme : InputScheme
         for (auto & [name, value] : url.query) {
             if (name == "rev" || name == "ref" || name == "keytype" || name == "publicKey" || name == "publicKeys")
                 attrs.emplace(name, value);
-            else if (name == "nixIgnore") {
-                auto version = string2Int<uint64_t>(value);
-                if (!version)
-                    throw BadURL("invalid nixIgnore version '%s'", value);
-                attrs.emplace(name, *version);
-            } else if (
+            else if (
                 name == "shallow" || name == "submodules" || name == "lfs" || name == "exportIgnore"
                 || name == "allRefs" || name == "verifyCommit")
                 attrs.emplace(name, Explicit<bool>{value == "1"});
@@ -311,14 +306,6 @@ struct GitInputScheme : InputScheme
                 {},
             },
             {
-                "nixIgnore",
-                {
-                    .type = "Integer",
-                    .required = false,
-                    .doc = "Version of root ignore-file source selection. Only version 1 is supported.",
-                },
-            },
-            {
                 "lastModified",
                 {
                     .type = "Integer",
@@ -413,7 +400,6 @@ struct GitInputScheme : InputScheme
         getShallowAttr(input);
         getSubmodulesAttr(input);
         getAllRefsAttr(input);
-        getNixIgnoreMode(input);
         return input;
     }
 
@@ -434,8 +420,6 @@ struct GitInputScheme : InputScheme
             url.query.insert_or_assign("submodules", "1");
         if (maybeGetBoolAttr(input.attrs, "exportIgnore").value_or(false))
             url.query.insert_or_assign("exportIgnore", "1");
-        if (auto version = maybeGetIntAttr(input.attrs, "nixIgnore"))
-            url.query.insert_or_assign("nixIgnore", std::to_string(*version));
         if (maybeGetBoolAttr(input.attrs, "verifyCommit").value_or(false))
             url.query.insert_or_assign("verifyCommit", "1");
         auto publicKeys = getPublicKeys(input.attrs);
@@ -724,13 +708,12 @@ struct GitInputScheme : InputScheme
         if (auto repoPath = repoInfo.getPath(); !input.getRef() && !input.getRev() && repoPath) {
             repoInfo.workdirInfo = GitRepo::getCachedWorkdirInfo(*repoPath);
 
-            auto mode = getNixIgnoreMode(input);
-            if (mode != NixIgnoreMode::Disabled) {
-                auto repo = GitRepo::openRepo(*repoPath, {});
-                ref<SourceAccessor> source = repo->getAccessor(
-                    repoInfo.workdirInfo, {.exportIgnore = getExportIgnoreAttr(input)}, makeNotAllowedError(*repoPath));
-                repoInfo.nixIgnoreFilter = readNixIgnore(source, vcsNixIgnoreFileNames);
+            auto repo = GitRepo::openRepo(*repoPath, {});
+            ref<SourceAccessor> source = repo->getAccessor(
+                repoInfo.workdirInfo, {.exportIgnore = getExportIgnoreAttr(input)}, makeNotAllowedError(*repoPath));
+            repoInfo.nixIgnoreFilter = readNixIgnore(source);
 
+            if (repoInfo.nixIgnoreFilter) {
                 auto filter = [&](auto & files) {
                     std::erase_if(files, [&](const CanonPath & file) {
                         return repoInfo.nixIgnoreFilter->match(file, SourceAccessor::tRegular).ignored;
@@ -970,10 +953,7 @@ struct GitInputScheme : InputScheme
         auto accessor = repo->getAccessor(
             rev, {.exportIgnore = exportIgnore, .smudgeLfs = smudgeLfs}, "«" + input.to_string() + "»");
 
-        auto mode = getNixIgnoreMode(input);
-        auto nixIgnoreFilter = mode != NixIgnoreMode::Disabled
-                                   ? std::make_optional(readNixIgnore(accessor, vcsNixIgnoreFileNames))
-                                   : std::nullopt;
+        auto nixIgnoreFilter = readNixIgnore(accessor);
 
         /* If the repo has submodules, fetch them and return a mounted
            input accessor consisting of the accessor for the top-level
@@ -1022,11 +1002,8 @@ struct GitInputScheme : InputScheme
             }
         }
 
-        if (nixIgnoreFilter && nixIgnoreFilter->sourceFile) {
+        if (nixIgnoreFilter)
             accessor = makeNixIgnoreSourceAccessor(accessor, std::move(*nixIgnoreFilter));
-            markNixIgnore(input);
-        } else
-            input.attrs.erase(std::string(nixIgnoreDiscoverAttr));
 
         assert(!origRev || origRev == rev);
 
@@ -1085,11 +1062,8 @@ struct GitInputScheme : InputScheme
             accessor = makeMountedSourceAccessor(std::move(mounts));
         }
 
-        if (repoInfo.nixIgnoreFilter && repoInfo.nixIgnoreFilter->sourceFile) {
+        if (repoInfo.nixIgnoreFilter)
             accessor = makeNixIgnoreSourceAccessor(accessor, *repoInfo.nixIgnoreFilter);
-            markNixIgnore(input);
-        } else
-            input.attrs.erase(std::string(nixIgnoreDiscoverAttr));
 
         if (!repoInfo.workdirInfo.isDirty) {
             auto repo = GitRepo::openRepo(repoPath, {});
@@ -1156,8 +1130,7 @@ struct GitInputScheme : InputScheme
     {
         auto makeFingerprint = [&](const Hash & rev) {
             return rev.gitRev() + (getSubmodulesAttr(input) ? ";s" : "") + (getExportIgnoreAttr(input) ? ";e" : "")
-                   + (getLfsAttr(input) ? ";l" : "")
-                   + (getNixIgnoreMode(input) != NixIgnoreMode::Disabled ? ";source-filter=nixignore-v1-final" : "");
+                   + (getLfsAttr(input) ? ";l" : "");
         };
 
         if (auto rev = input.getRev())

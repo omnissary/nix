@@ -22,7 +22,6 @@
 #include "nix/util/strings.hh"
 #include "nix/util/util.hh"
 #include "nix/fetchers/attrs.hh"
-#include "nix/fetchers/nixignore.hh"
 #include "nix/fetchers/registry.hh"
 #include "nix/store/outputs-spec.hh"
 #include "nix/util/ref.hh"
@@ -301,9 +300,7 @@ FlakeRef FlakeRef::fromAttrs(const fetchers::Attrs & attrs)
 std::pair<ref<SourceAccessor>, FlakeRef>
 FlakeRef::lazyFetch(const fetchers::Settings & fetchSettings, Store & store) const
 {
-    auto sourceInput = input;
-    fetchers::discoverNixIgnore(sourceInput);
-    auto [accessor, lockedInput] = sourceInput.getAccessor(fetchSettings, store);
+    auto [accessor, lockedInput] = input.getAccessor(fetchSettings, store);
     return {accessor, FlakeRef(std::move(lockedInput), subdir)};
 }
 

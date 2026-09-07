@@ -1,46 +1,49 @@
 # `.nixignore`
 
-When Nix loads a [flake](@docroot@/command-ref/new-cli/nix3-flake.md),
-it applies a versioned source-selection policy before hashing or copying local source trees.
-The policy reads the first regular file that exists at the source root, in this order:
+A source tree can exclude files from the source Nix copies or hashes by
+providing a `.nixignore` file at its root.
 
-1. `.nixignore`
-2. `.ignore`
-3. `.gitignore`
+If the root of a fetched source contains a regular `.nixignore` file, its rules
+select which of the source's files are used. If there is no such file, the
+source is used exactly as it was before this mechanism existed.
+The `.nixignore` file is itself always included in the source, and Nix rejects a
+rule set that excludes it.
 
-Git inputs are the exception: only `.nixignore` is read.
-Git has already applied `.gitignore` and `.ignore` when it decided which files to track,
-so consulting them again would drop files that were committed in spite of them.
-
-If no policy file applies, all candidate files are included.
-The selected policy file is itself included in the source,
-and Nix rejects a rule set that excludes it.
-Changing the policy file therefore changes the source identity.
+Nothing is recorded in `flake.lock`. Whether the policy applies is a property of
+the fetched tree, so a pinned revision always selects the same files, and lock
+entries stay readable by a Nix that does not know about `.nixignore`.
 
 ## Candidates
 
-The policy narrows a set of candidate files; it never adds one.
+The policy narrows the set of files a fetcher already selected; it never adds
+one.
 
-For Git inputs the candidates are the files the Git fetcher selects:
-the tracked files of the working tree, or those of the fetched revision.
-Untracked files are not part of a Git input.
-A path-like reference to a directory inside a Git repository is a Git input rooted at the repository,
-and a flake in a subdirectory is represented with `dir=`,
-so revision metadata such as `self.rev` and dirty-tree detection are unaffected by the policy.
-A working tree whose only modifications are excluded by the policy is not dirty.
+For Git inputs the candidates are the files Git selects: the tracked files of
+the working tree, or those of the fetched revision. Untracked files are not part
+of a Git input. `.gitignore` and `.ignore` are deliberately **not** consulted:
+Git has already applied them when it decided what to track, so reading them
+again would drop files that were committed in spite of them.
 
-For path inputs every filesystem entry below the input root is a candidate.
-A flake inside a Mercurial or Jujutsu work tree is a path input rooted at the flake directory.
+A path-like reference to a directory inside a Git repository is a Git input
+rooted at the repository, and a flake in a subdirectory is represented with
+`dir=`, so revision metadata such as `self.rev` and dirty-tree detection are
+unaffected by the policy. A working tree whose only modifications are excluded
+by the policy is not dirty.
 
-When Git submodules are enabled, the root policy is also applied to the mounted submodule contents;
-policy files inside submodules are not read.
+For path inputs every filesystem entry below the input root is a candidate. A
+flake inside a Mercurial or Jujutsu work tree is a path input rooted at the
+flake directory.
 
-Directories or files named `.git`, `.hg`, or `.jj` are always excluded at every depth.
-This exclusion cannot be negated by a pattern.
+Every source applies its own policy. When Git submodules are enabled, a
+submodule's own `.nixignore` governs its contents, and the superproject's policy
+applies on top of the mounted result.
+
+When a policy applies, directories or files named `.git`, `.hg`, or `.jj` are
+excluded at every depth. This exclusion cannot be negated by a pattern.
 
 ## Pattern syntax
 
-Version 1 uses Git ignore pattern semantics:
+Patterns use Git ignore pattern semantics:
 
 - blank lines and lines beginning with `#` are ignored;
 - a leading `/` anchors a pattern at the source root;
@@ -50,8 +53,9 @@ Version 1 uses Git ignore pattern semantics:
 - `\#`, `\!`, and escaped trailing spaces represent literal characters.
 
 Matching is case-sensitive.
-Only the selected root policy file is read; nested ignore files do not add rules.
-As with Git, a file cannot be re-included while one of its parent directories remains excluded.
+Only the root `.nixignore` is read; nested ignore files do not add rules.
+As with Git, a file cannot be re-included while one of its parent directories
+remains excluded.
 
 ```gitignore
 /network/
@@ -60,17 +64,14 @@ As with Git, a file cannot be re-included while one of its parent directories re
 !build/important.log
 ```
 
-## Activation and compatibility
+## Caveats
 
-Flake loading enables source-selection discovery automatically for Git and path inputs.
-Resolved and locked directory inputs record `nixIgnore = 1`, including when no policy file exists.
-This records the source-selection version and keeps subsequent fetches deterministic.
-
-Generic fetchers such as `builtins.fetchTree` and `builtins.fetchGit` retain their previous behavior by default.
-Pass `nixIgnore = 1` to opt in explicitly.
-
-Existing final lock entries without `nixIgnore` retain their legacy source selection for compatibility.
-Updating such an entry opts it into version 1.
+Adding a `.nixignore` changes the source Nix selects, and therefore the source
+hash. Because it is a new file, existing lock entries pin revisions that do not
+contain one and are unaffected; a lock entry that is updated onto a revision
+that does contain one will hash differently than it did before, and than an
+older Nix would.
 
 `.nixignore` is a source-selection mechanism, not encryption.
-It does not remove existing store paths or prevent an impure expression from importing the same data through another path.
+It does not remove existing store paths or prevent an impure expression from
+importing the same data through another path.
