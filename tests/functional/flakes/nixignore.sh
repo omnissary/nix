@@ -341,8 +341,23 @@ test -e "$jjSource/kept"
 test ! -e "$jjSource/dropped"
 test ! -e "$jjSource/untracked"
 
-# The source-selection version is recorded even without a policy file.
+# The source-selection version is recorded only when the policy actually
+# changed the selection, so lock entries stay readable by a Nix that does not
+# know the attribute.
 noPolicy=$TEST_ROOT/nixignore-no-policy
 mkdir -p "$noPolicy"
 echo '{ outputs = _: {}; }' > "$noPolicy/flake.nix"
-[[ $(nix flake metadata --json "path:$noPolicy" | jq -r .locked.nixIgnore) = 1 ]]
+[[ $(nix flake metadata --json "path:$noPolicy" | jq -r '.locked.nixIgnore // "none"') = none ]]
+
+noPolicyRepo=$TEST_ROOT/nixignore-no-policy-git
+createGitRepo "$noPolicyRepo"
+echo '{ outputs = _: {}; }' > "$noPolicyRepo/flake.nix"
+echo /build > "$noPolicyRepo/.gitignore"
+git -C "$noPolicyRepo" add flake.nix .gitignore
+git -C "$noPolicyRepo" commit -m initial
+[[ $(nix flake metadata --refresh --json "git+file://$noPolicyRepo?ref=master" | jq -r '.locked.nixIgnore // "none"') = none ]]
+
+echo /build > "$noPolicyRepo/.nixignore"
+git -C "$noPolicyRepo" add .nixignore
+git -C "$noPolicyRepo" commit -m policy
+[[ $(nix flake metadata --refresh --json "git+file://$noPolicyRepo?ref=master" | jq -r .locked.nixIgnore) = 1 ]]

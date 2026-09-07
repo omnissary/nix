@@ -181,6 +181,7 @@ struct PathInputScheme : InputScheme
         if (mode != NixIgnoreMode::Disabled && source->lstat(CanonPath::root).type == SourceAccessor::tDirectory) {
             auto filter = readNixIgnore(source);
             Activity act(*logger, lvlTalkative, actUnknown, fmt("copying %s to the store", PathFmt(absPath)));
+            bool excluded = false;
             PathFilter pathFilter = [&](const std::string & path) {
                 CanonPath canonPath(path);
                 auto st = std::filesystem::symlink_status(absPath / canonPath.rel());
@@ -188,11 +189,18 @@ struct PathInputScheme : InputScheme
                             : std::filesystem::is_regular_file(st) ? SourceAccessor::tRegular
                             : std::filesystem::is_symlink(st)      ? SourceAccessor::tSymlink
                                                                    : SourceAccessor::tUnknown;
-                return !filter.match(canonPath, type).ignored;
+                if (filter.match(canonPath, type).ignored) {
+                    excluded = true;
+                    return false;
+                }
+                return true;
             };
             auto src = sinkToSource([&](Sink & sink) { mtime = dumpPathAndGetMtime(absPath, sink, pathFilter); });
             storePath = store.addToStoreFromDump(*src, "source");
-            markNixIgnore(input);
+            if (filter.sourceFile || excluded)
+                markNixIgnore(input);
+            else
+                input.attrs.erase(std::string(nixIgnoreDiscoverAttr));
         } else {
             if (mode == NixIgnoreMode::Required)
                 throw Error("source declares nixIgnore version %d but is not a directory", nixIgnoreVersion);
