@@ -7,11 +7,6 @@ namespace nix::fetchers {
 enum class UseRegistries : int;
 struct Settings;
 
-enum class SourceSelectionPolicy {
-    Legacy,
-    NixIgnoreV1,
-};
-
 struct InputCache
 {
     struct CachedResult
@@ -22,12 +17,8 @@ struct InputCache
         Attrs extraAttrs;
     };
 
-    CachedResult getAccessor(
-        const Settings & settings,
-        Store & store,
-        const Input & originalInput,
-        UseRegistries useRegistries,
-        SourceSelectionPolicy sourceSelectionPolicy = SourceSelectionPolicy::Legacy);
+    CachedResult
+    getAccessor(const Settings & settings, Store & store, const Input & originalInput, UseRegistries useRegistries);
 
     struct CachedInput
     {

@@ -1,15 +1,16 @@
 ---
-synopsis: Filter flake sources with ignore files
+synopsis: Filter flake sources with `.nixignore`
 significance: significant
 issues: 12291
 ---
 
-Flake source selection now reads a root [`.nixignore`, `.ignore`, or `.gitignore`](@docroot@/command-ref/files/nixignore.md)
-before hashing or copying Git and path inputs.
-The policy only narrows what a fetcher already selects:
-Git inputs still contribute their tracked files, keep their revision metadata, and read only `.nixignore`,
-since Git applied its own ignore files when it chose what to track.
+A source tree can now exclude files from what Nix copies or hashes by providing
+a [`.nixignore`](@docroot@/command-ref/files/nixignore.md) file at its root,
+using Git ignore pattern syntax.
 
-Resolved inputs record `nixIgnore = 1` even when no policy file is present.
-Existing lock entries without this marker retain legacy behavior until updated.
-Generic fetchers do not discover ignore files automatically; pass `nixIgnore = 1` to opt in.
+The policy only narrows what a fetcher already selects. Git inputs still
+contribute their tracked files and keep their revision metadata, and
+`.gitignore` is not consulted, since Git applied it when it chose what to track.
+
+Nothing is recorded in `flake.lock`: whether the policy applies follows from the
+fetched tree, so lock entries remain readable by a Nix without this feature.

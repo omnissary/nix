@@ -220,7 +220,6 @@ TEST_F(GitTest, nixIgnoreFiltersTrackedWorktreeAndDirtyState)
     auto store = cfg->openStore();
     auto settings = fetchers::Settings{};
     auto input = fetchers::Input::fromAttrs({
-        {"nixIgnore", nixIgnoreVersion},
         {"url", "file://" + encodeUrlPath(pathToUrlPath(repoPath))},
         {"type", "git"},
     });
@@ -228,7 +227,6 @@ TEST_F(GitTest, nixIgnoreFiltersTrackedWorktreeAndDirtyState)
     auto [accessor1, resolved1] = input.getAccessor(settings, *store);
     EXPECT_EQ(accessor1->readFile(CanonPath("visible")), "public\n");
     EXPECT_FALSE(accessor1->maybeLstat(CanonPath("secret")));
-    EXPECT_EQ(maybeGetIntAttr(resolved1.attrs, "nixIgnore"), nixIgnoreVersion);
     auto fingerprint1 = resolved1.getFingerprint(*store);
 
     writeFile(repoPath / "secret" / "value", "different decrypted value\n");
@@ -253,7 +251,6 @@ TEST_F(GitTest, nixIgnoreFiltersPathInputBeforeStoreCopy)
     auto store = cfg->openStore();
     auto settings = fetchers::Settings{};
     auto input = fetchers::Input::fromAttrs({
-        {"nixIgnore", nixIgnoreVersion},
         {"path", sourcePath.string()},
         {"type", "path"},
     });
@@ -261,7 +258,6 @@ TEST_F(GitTest, nixIgnoreFiltersPathInputBeforeStoreCopy)
     auto [accessor, resolved] = input.getAccessor(settings, *store);
     EXPECT_EQ(accessor->readFile(CanonPath("visible")), "public\n");
     EXPECT_FALSE(accessor->maybeLstat(CanonPath("secret")));
-    EXPECT_EQ(maybeGetIntAttr(resolved.attrs, "nixIgnore"), nixIgnoreVersion);
     ASSERT_TRUE(resolved.getLastModified());
     EXPECT_GT(*resolved.getLastModified(), 0);
 }
@@ -283,7 +279,6 @@ TEST_F(GitTest, nixIgnoreKeepsTrackedFilesMatchingGitIgnore)
     auto store = cfg->openStore();
     auto settings = fetchers::Settings{};
     auto attrs = fetchers::Attrs{
-        {"nixIgnore", nixIgnoreVersion},
         {"url", "file://" + encodeUrlPath(pathToUrlPath(repoPath))},
         {"type", "git"},
     };

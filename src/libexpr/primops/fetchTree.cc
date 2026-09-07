@@ -135,9 +135,6 @@ void emitTreeAttrs(
     if (auto narHash = input.getNarHash())
         attrs.alloc("narHash", callPos).mkString(narHash->to_string(HashFormat::SRI, true), state.mem);
 
-    if (auto nixIgnore = fetchers::maybeGetIntAttr(input.attrs, "nixIgnore"))
-        attrs.alloc("nixIgnore", callPos).mkInt(*nixIgnore);
-
     if (input.getType() == "git")
         attrs.alloc("submodules", callPos)
             .mkBool(fetchers::maybeGetBoolAttr(input.attrs, "submodules").value_or(false));
