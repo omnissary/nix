@@ -4,10 +4,11 @@ source ./common.sh
 
 requireGit
 
-# A shorthand local flake is a path snapshot rooted at the nearest VCS root.
+# A shorthand local flake stays a Git input rooted at the repository, and the
+# root policy filters the files Git selected.
 repo=$TEST_ROOT/nixignore-repo
 createGitRepo "$repo"
-mkdir -p "$repo/secret" "$repo/sub" "$repo/nested/.git" "$repo/nested/.hg" "$repo/nested/.jj"
+mkdir -p "$repo/secret" "$repo/sub"
 git -C "$repo" config filter.nixignore.clean "sed 's/private/encrypted/g'"
 git -C "$repo" config filter.nixignore.smudge "sed 's/encrypted/private/g'"
 
@@ -15,7 +16,7 @@ cat > "$repo/flake.nix" <<'EOF'
 {
   outputs = { self }: {
     visible = builtins.readFile ./visible;
-    untracked = builtins.readFile ./untracked;
+    rev = self.rev or "none";
     source = self.outPath;
   };
 }
@@ -28,11 +29,8 @@ EOF
 echo public > "$repo/visible"
 echo private > "$repo/secret/value"
 echo /secret/ > "$repo/.nixignore"
-echo /untracked > "$repo/.gitignore"
+echo /junk > "$repo/.gitignore"
 echo '/secret/value filter=nixignore' > "$repo/.gitattributes"
-echo vcs > "$repo/nested/.git/config"
-echo vcs > "$repo/nested/.hg/requires"
-echo vcs > "$repo/nested/.jj/repo"
 git -C "$repo" add flake.nix sub/flake.nix visible secret/value .nixignore .gitignore .gitattributes
 git -C "$repo" commit -m initial
 echo untracked > "$repo/untracked"
@@ -40,41 +38,60 @@ echo untracked > "$repo/untracked"
 [[ $(< "$repo/secret/value") = private ]]
 
 localMetadata=$(nix flake metadata --refresh --json "$repo")
-source1=$(jq -r .path <<< "$localMetadata")
-[[ $(jq -r .locked.type <<< "$localMetadata") = path ]]
+source1=$(nix flake prefetch --refresh --json "$repo" | jq -r .storePath)
+[[ $(jq -r .locked.type <<< "$localMetadata") = git ]]
 [[ $(jq -r .locked.nixIgnore <<< "$localMetadata") = 1 ]]
-[[ $(jq -r '.locked.rev // "none"' <<< "$localMetadata") = none ]]
 test -e "$source1/flake.nix"
 test -e "$source1/.nixignore"
-test -e "$source1/untracked"
 test ! -e "$source1/secret"
 test ! -e "$source1/.git"
-test ! -e "$source1/nested/.git"
-test ! -e "$source1/nested/.hg"
-test ! -e "$source1/nested/.jj"
 [[ $(nix eval --raw "$repo#visible") = public ]]
-[[ $(nix eval --raw "$repo#untracked") = untracked ]]
 
-# An explicit Git URL remains Git-backed and only exposes Git candidates.
+# Git metadata survives: a shorthand reference is not downgraded to a path
+# snapshot, so the revision is still available and untracked files stay out.
+[[ $(jq -r '.locked.rev // "none"' <<< "$localMetadata") != none ]]
+[[ $(nix eval --raw "$repo#rev") != none ]]
+test ! -e "$source1/untracked"
+
+# A shorthand reference and the same revision fetched over git+file: select
+# the same files.
 explicitGit="git+file://$repo?ref=master"
 gitMetadata=$(nix flake metadata --refresh --json "$explicitGit")
-gitSource=$(jq -r .path <<< "$gitMetadata")
+gitSource=$(nix flake prefetch --refresh --json "$explicitGit" | jq -r .storePath)
 [[ $(jq -r .locked.type <<< "$gitMetadata") = git ]]
 [[ $(jq -r .locked.nixIgnore <<< "$gitMetadata") = 1 ]]
 [[ $(jq -r .locked.rev <<< "$gitMetadata") != null ]]
 test ! -e "$gitSource/untracked"
 test ! -e "$gitSource/secret"
 test ! -e "$gitSource/.git"
-[[ $source1 != "$gitSource" ]]
+[[ $source1 = "$gitSource" ]]
 
-# The ignore root stays at the source root for a flake in a subdirectory.
+# Git already applied its own ignore files when it chose what to track, so a
+# Git input must not consult them again: a tracked file that .gitignore
+# matches stays in the source.
+forced=$TEST_ROOT/nixignore-forced
+createGitRepo "$forced"
+cat > "$forced/flake.nix" <<'EOF'
+{ outputs = _: {}; }
+EOF
+echo generated > "$forced/.gitignore"
+echo kept > "$forced/generated"
+git -C "$forced" add -f flake.nix .gitignore generated
+git -C "$forced" commit -m initial
+test -e "$(nix flake prefetch --refresh --json "$forced" | jq -r .storePath)/generated"
+test -e "$(nix flake prefetch --refresh --json "git+file://$forced?ref=master" | jq -r .storePath)/generated"
+
+# The ignore root stays at the repository root for a flake in a subdirectory.
 subMetadata=$(nix flake metadata --refresh --json "$repo/sub")
+subSource=$(nix flake prefetch --refresh --json "$repo/sub" | jq -r .storePath)
+[[ $(jq -r .locked.type <<< "$subMetadata") = git ]]
 [[ $(jq -r .locked.dir <<< "$subMetadata") = sub ]]
-subSource=$(jq -r .path <<< "$subMetadata")
 test ! -e "$subSource/secret"
-test -e "$subSource/untracked"
+test ! -e "$subSource/untracked"
+test -e "$subSource/sub/flake.nix"
 
-# Ignored content affects neither the source hash nor lastModified.
+# Ignored content affects neither the source hash nor lastModified, and does
+# not make the working tree dirty.
 fingerprint1=$(jq -r .fingerprint <<< "$localMetadata")
 lastModified1=$(jq -r .locked.lastModified <<< "$localMetadata")
 echo changed-private > "$repo/secret/value"
@@ -82,6 +99,8 @@ touch -d @2000000000 "$repo/secret/value"
 localMetadata2=$(nix flake metadata --refresh --json "$repo")
 [[ $(jq -r .fingerprint <<< "$localMetadata2") = "$fingerprint1" ]]
 [[ $(jq -r .locked.lastModified <<< "$localMetadata2") = "$lastModified1" ]]
+[[ $(jq -r '.locked.rev // "none"' <<< "$localMetadata2") != none ]]
+git -C "$repo" checkout -- secret/value
 
 echo '# policy change' >> "$repo/.nixignore"
 policyFingerprint=$(nix flake metadata --refresh --json "$repo" | jq -r .fingerprint)
@@ -90,6 +109,7 @@ policyFingerprint=$(nix flake metadata --refresh --json "$repo" | jq -r .fingerp
 echo changed-public > "$repo/visible"
 fingerprint3=$(nix flake metadata --refresh --json "$repo" | jq -r .fingerprint)
 [[ $policyFingerprint != "$fingerprint3" ]]
+git -C "$repo" checkout -- visible .nixignore
 
 # Generic fetchers retain legacy behavior unless nixIgnore is explicit.
 legacyTreeJson=$(nix eval --impure --json --expr \
@@ -134,10 +154,15 @@ EOF
 touch "$policySource/git-only" "$policySource/ignore-only" "$policySource/nix-only" "$policySource/nested/visible"
 echo /git-only > "$policySource/.gitignore"
 echo /nested/visible > "$policySource/nested/.nixignore"
+mkdir -p "$policySource/nested/.git" "$policySource/nested/.hg" "$policySource/nested/.jj"
+touch "$policySource/nested/.git/config" "$policySource/nested/.hg/requires" "$policySource/nested/.jj/repo"
 policyStore=$(nix flake prefetch --refresh --json "path:$policySource" | jq -r .storePath)
 test ! -e "$policyStore/git-only"
 test -e "$policyStore/ignore-only"
 test -e "$policyStore/nested/visible"
+test ! -e "$policyStore/nested/.git"
+test ! -e "$policyStore/nested/.hg"
+test ! -e "$policyStore/nested/.jj"
 
 echo /ignore-only > "$policySource/.ignore"
 policyStore=$(nix flake prefetch --refresh --json "path:$policySource" | jq -r .storePath)
@@ -280,34 +305,41 @@ nix flake update dep --flake "$consumer"
 [[ $(jq -r .nodes.dep.locked.nixIgnore "$consumer/flake.lock") = 1 ]]
 [[ $(nix eval --json "$consumer#hasSecret") = false ]]
 
-# Mercurial and Jujutsu roots provide the same boundary for shorthand path flakes.
+# Only a Git root widens a shorthand reference to the whole repository. A flake
+# inside a Mercurial or Jujutsu work tree is a path source rooted at the flake
+# directory, so the policy is read from there.
 hgRoot=$TEST_ROOT/nixignore-hg
 if [[ -n $(type -p hg) ]]; then
     mkdir -p "$hgRoot/sub" "$hgRoot/hidden"
     hg init "$hgRoot"
     echo '{ outputs = _: {}; }' > "$hgRoot/sub/flake.nix"
-    echo /hidden/ > "$hgRoot/.gitignore"
     echo hidden > "$hgRoot/hidden/value"
-    echo visible > "$hgRoot/untracked"
-    hgMetadata=$(nix flake metadata --json "$hgRoot/sub")
-    hgSource=$(jq -r .path <<< "$hgMetadata")
+    echo /dropped > "$hgRoot/sub/.nixignore"
+    echo dropped > "$hgRoot/sub/dropped"
+    echo kept > "$hgRoot/sub/kept"
+    hgMetadata=$(nix flake metadata --refresh --json "$hgRoot/sub")
+    hgSource=$(nix flake prefetch --refresh --json "$hgRoot/sub" | jq -r .storePath)
     [[ $(jq -r .locked.type <<< "$hgMetadata") = path ]]
-    [[ $(jq -r .locked.dir <<< "$hgMetadata") = sub ]]
-    test -e "$hgSource/untracked"
+    [[ $(jq -r '.locked.dir // "none"' <<< "$hgMetadata") = none ]]
+    test -e "$hgSource/kept"
+    test ! -e "$hgSource/dropped"
     test ! -e "$hgSource/hidden"
-    test ! -e "$hgSource/.hg"
 fi
 
 jjRoot=$TEST_ROOT/nixignore-jj
 mkdir -p "$jjRoot/.jj/repo" "$jjRoot/sub"
 echo '{ outputs = _: {}; }' > "$jjRoot/sub/flake.nix"
-echo visible > "$jjRoot/untracked"
-jjMetadata=$(nix flake metadata --json "$jjRoot/sub")
-jjSource=$(jq -r .path <<< "$jjMetadata")
+echo hidden > "$jjRoot/untracked"
+echo /dropped > "$jjRoot/sub/.nixignore"
+echo dropped > "$jjRoot/sub/dropped"
+echo kept > "$jjRoot/sub/kept"
+jjMetadata=$(nix flake metadata --refresh --json "$jjRoot/sub")
+jjSource=$(nix flake prefetch --refresh --json "$jjRoot/sub" | jq -r .storePath)
 [[ $(jq -r .locked.type <<< "$jjMetadata") = path ]]
-[[ $(jq -r .locked.dir <<< "$jjMetadata") = sub ]]
-test -e "$jjSource/untracked"
-test ! -e "$jjSource/.jj"
+[[ $(jq -r '.locked.dir // "none"' <<< "$jjMetadata") = none ]]
+test -e "$jjSource/kept"
+test ! -e "$jjSource/dropped"
+test ! -e "$jjSource/untracked"
 
 # The source-selection version is recorded even without a policy file.
 noPolicy=$TEST_ROOT/nixignore-no-policy

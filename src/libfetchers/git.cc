@@ -729,7 +729,7 @@ struct GitInputScheme : InputScheme
                 auto repo = GitRepo::openRepo(*repoPath, {});
                 ref<SourceAccessor> source = repo->getAccessor(
                     repoInfo.workdirInfo, {.exportIgnore = getExportIgnoreAttr(input)}, makeNotAllowedError(*repoPath));
-                repoInfo.nixIgnoreFilter = readNixIgnore(source);
+                repoInfo.nixIgnoreFilter = readNixIgnore(source, vcsNixIgnoreFileNames);
 
                 auto filter = [&](auto & files) {
                     std::erase_if(files, [&](const CanonPath & file) {
@@ -971,8 +971,9 @@ struct GitInputScheme : InputScheme
             rev, {.exportIgnore = exportIgnore, .smudgeLfs = smudgeLfs}, "«" + input.to_string() + "»");
 
         auto mode = getNixIgnoreMode(input);
-        auto nixIgnoreFilter =
-            mode != NixIgnoreMode::Disabled ? std::make_optional(readNixIgnore(accessor)) : std::nullopt;
+        auto nixIgnoreFilter = mode != NixIgnoreMode::Disabled
+                                   ? std::make_optional(readNixIgnore(accessor, vcsNixIgnoreFileNames))
+                                   : std::nullopt;
 
         /* If the repo has submodules, fetch them and return a mounted
            input accessor consisting of the accessor for the top-level

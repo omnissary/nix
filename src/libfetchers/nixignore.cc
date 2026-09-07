@@ -362,11 +362,11 @@ NixIgnoreRules::Match NixIgnoreFilter::match(const CanonPath & path, SourceAcces
     return rules.match(path, type);
 }
 
-NixIgnoreFilter readNixIgnore(ref<SourceAccessor> source)
+NixIgnoreFilter readNixIgnore(ref<SourceAccessor> source, std::span<const std::string_view> fileNames)
 {
     NixIgnoreFilter result;
 
-    for (auto name : nixIgnoreFileNames) {
+    for (auto name : fileNames) {
         CanonPath path(name);
         auto stat = source->maybeLstat(path);
         if (!stat)

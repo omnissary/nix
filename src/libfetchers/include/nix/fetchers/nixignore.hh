@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,6 +21,13 @@ inline constexpr std::array<std::string_view, 3> nixIgnoreFileNames{
     nixIgnoreFileName,
     ".ignore",
     ".gitignore",
+};
+
+/* A VCS has already applied its own ignore files when it selected the
+   candidates, so consulting them again would drop tracked files that were
+   added in spite of them. */
+inline constexpr std::array<std::string_view, 1> vcsNixIgnoreFileNames{
+    nixIgnoreFileName,
 };
 
 enum class NixIgnoreMode {
@@ -79,7 +87,8 @@ struct NixIgnoreFilter
 };
 
 /** Select and compile the first root ignore file, if one exists. */
-NixIgnoreFilter readNixIgnore(ref<SourceAccessor> source);
+NixIgnoreFilter
+readNixIgnore(ref<SourceAccessor> source, std::span<const std::string_view> fileNames = nixIgnoreFileNames);
 
 /** Wrap `source` so ignored paths are inaccessible and omitted from directory listings. */
 ref<SourceAccessor> makeNixIgnoreSourceAccessor(ref<SourceAccessor> source, NixIgnoreFilter filter);

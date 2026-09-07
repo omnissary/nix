@@ -1,8 +1,6 @@
 #include <assert.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <algorithm>
-#include <array>
 #include <filesystem>
 #include <ostream>
 #include <string_view>
@@ -179,25 +177,9 @@ std::pair<FlakeRef, std::string> parsePathFlakeRefWithFragment(
             std::string subdir;
 
             while (flakeRoot.parent_path() != flakeRoot) {
-                if (isVcsRoot(flakeRoot)) {
-                    static constexpr std::array<std::string_view, 11> gitQueryAttrs{
-                        "ref",
-                        "rev",
-                        "shallow",
-                        "submodules",
-                        "lfs",
-                        "exportIgnore",
-                        "allRefs",
-                        "verifyCommit",
-                        "keytype",
-                        "publicKey",
-                        "publicKeys",
-                    };
-                    bool requestsGit = isGitRoot(flakeRoot) && std::ranges::any_of(gitQueryAttrs, [&](auto attr) {
-                                           return query.contains(std::string(attr));
-                                       });
+                if (isGitRoot(flakeRoot)) {
                     auto parsedURL = ParsedURL{
-                        .scheme = requestsGit ? "git+file" : "path",
+                        .scheme = "git+file",
                         .authority = ParsedURL::Authority{},
                         .path = pathToUrlPath(flakeRoot),
                         .query = query,
@@ -211,7 +193,7 @@ std::pair<FlakeRef, std::string> parsePathFlakeRefWithFragment(
                             parsedURL.query.insert_or_assign("dir", subdir);
                     }
 
-                    if (requestsGit && pathExists(flakeRoot / ".git" / "shallow"))
+                    if (pathExists(flakeRoot / ".git" / "shallow"))
                         parsedURL.query.insert_or_assign("shallow", "1");
 
                     return fromParsedURL(std::move(parsedURL), isFlake);
