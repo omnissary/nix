@@ -1022,10 +1022,11 @@ struct GitInputScheme : InputScheme
             }
         }
 
-        if (nixIgnoreFilter) {
+        if (nixIgnoreFilter && nixIgnoreFilter->sourceFile) {
             accessor = makeNixIgnoreSourceAccessor(accessor, std::move(*nixIgnoreFilter));
             markNixIgnore(input);
-        }
+        } else
+            input.attrs.erase(std::string(nixIgnoreDiscoverAttr));
 
         assert(!origRev || origRev == rev);
 
@@ -1084,10 +1085,11 @@ struct GitInputScheme : InputScheme
             accessor = makeMountedSourceAccessor(std::move(mounts));
         }
 
-        if (repoInfo.nixIgnoreFilter) {
+        if (repoInfo.nixIgnoreFilter && repoInfo.nixIgnoreFilter->sourceFile) {
             accessor = makeNixIgnoreSourceAccessor(accessor, *repoInfo.nixIgnoreFilter);
             markNixIgnore(input);
-        }
+        } else
+            input.attrs.erase(std::string(nixIgnoreDiscoverAttr));
 
         if (!repoInfo.workdirInfo.isDirty) {
             auto repo = GitRepo::openRepo(repoPath, {});
