@@ -41,3 +41,5 @@ flake-regressions
 
 # direnv
 .direnv/
+
+/nix-cage.json
