@@ -9,6 +9,7 @@
 #include "nix/util/environment-variables.hh"
 #include "nix/util/users.hh"
 #include "nix/fetchers/cache.hh"
+#include "nix/fetchers/nixignore.hh"
 #include "nix/store/store-api.hh"
 #include "nix/util/url-parts.hh"
 #include "nix/fetchers/fetch-settings.hh"
@@ -223,65 +224,100 @@ struct MercurialInputScheme : InputScheme
             auto unlocked = !input.getRef() && !input.getRev();
             auto isValidLocalRepo = pathExists(localPath / ".hg");
             // short circuiting to not bother checking if locked / no repo is important.
-            bool dirty = unlocked && isValidLocalRepo
-                         && runHg({
-                                OS_STR("status"),
-                                OS_STR("-R"),
-                                localPath.native(),
-                                OS_STR("--modified"),
-                                OS_STR("--added"),
-                                OS_STR("--removed"),
-                            }) != "";
-            if (dirty) {
-                /* This is an unclean working tree. So copy all tracked
-                   files. */
-
-                if (!settings.allowDirty)
-                    throw Error("Mercurial tree '%s' is unclean", PathFmt{localPath});
-
-                if (settings.warnDirty)
-                    warn("Mercurial tree '%s' is unclean", PathFmt{localPath});
-
-                input.attrs.insert_or_assign("ref", chomp(runHg({OS_STR("branch"), OS_STR("-R"), localPath.native()})));
-
+            if (unlocked && isValidLocalRepo) {
                 using namespace std::string_literals;
 
-                auto files = tokenizeString<StringSet>(
+                /* FIXME: Check that the access to this path is allowed. */
+                auto accessor = makeFSSourceAccessor(absPath(localPath));
+
+                auto nixIgnoreFilter = readNixIgnore(accessor);
+
+                /* The policy file is itself part of the source it filters, so
+                   only a tracked one is read. */
+                if (nixIgnoreFilter
+                    && runHg({
+                           OS_STR("status"),
+                           OS_STR("-R"),
+                           localPath.native(),
+                           OS_STR("--clean"),
+                           OS_STR("--modified"),
+                           OS_STR("--added"),
+                           OS_STR("--no-status"),
+                           (localPath / nixIgnoreFileName).native(),
+                       }) == "")
+                    nixIgnoreFilter.reset();
+
+                auto changed = tokenizeString<StringSet>(
                     runHg({
                         OS_STR("status"),
                         OS_STR("-R"),
                         localPath.native(),
-                        OS_STR("--clean"),
                         OS_STR("--modified"),
                         OS_STR("--added"),
+                        OS_STR("--removed"),
                         OS_STR("--no-status"),
                         OS_STR("--print0"),
                     }),
                     "\0"s);
 
-                /* FIXME: Check that the access to this path is allowed. */
-                auto accessor = makeFSSourceAccessor(absPath(localPath));
-
-                PathFilter filter = [&](const std::string & p) -> bool {
-                    auto cp = CanonPath(p);
-                    auto st = accessor->lstat(cp);
-
-                    if (st.type == SourceAccessor::tDirectory) {
-                        auto prefix = cp.rel() + "/";
-                        auto i = files.lower_bound(prefix);
-                        return i != files.end() && hasPrefix(*i, prefix);
+                bool dirty = false;
+                for (auto & file : changed)
+                    if (!nixIgnoreFilter
+                        || !nixIgnoreFilter->match(CanonPath(file), SourceAccessor::tRegular).ignored) {
+                        dirty = true;
+                        break;
                     }
 
-                    return files.count(cp.rel());
-                };
+                if (dirty) {
+                    /* This is an unclean working tree. So copy all tracked
+                       files. */
 
-                return store.addToStore(
-                    input.getName(),
-                    {accessor, CanonPath::root},
-                    ContentAddressMethod::Raw::NixArchive,
-                    HashAlgorithm::SHA256,
-                    {},
-                    filter);
+                    if (!settings.allowDirty)
+                        throw Error("Mercurial tree '%s' is unclean", PathFmt{localPath});
+
+                    if (settings.warnDirty)
+                        warn("Mercurial tree '%s' is unclean", PathFmt{localPath});
+
+                    input.attrs.insert_or_assign(
+                        "ref", chomp(runHg({OS_STR("branch"), OS_STR("-R"), localPath.native()})));
+
+                    auto files = tokenizeString<StringSet>(
+                        runHg({
+                            OS_STR("status"),
+                            OS_STR("-R"),
+                            localPath.native(),
+                            OS_STR("--clean"),
+                            OS_STR("--modified"),
+                            OS_STR("--added"),
+                            OS_STR("--no-status"),
+                            OS_STR("--print0"),
+                        }),
+                        "\0"s);
+
+                    PathFilter filter = [&](const std::string & p) -> bool {
+                        auto cp = CanonPath(p);
+                        auto st = accessor->lstat(cp);
+
+                        if (nixIgnoreFilter && nixIgnoreFilter->match(cp, st.type).ignored)
+                            return false;
+
+                        if (st.type == SourceAccessor::tDirectory) {
+                            auto prefix = cp.rel() + "/";
+                            auto i = files.lower_bound(prefix);
+                            return i != files.end() && hasPrefix(*i, prefix);
+                        }
+
+                        return files.count(cp.rel());
+                    };
+
+                    return store.addToStore(
+                        input.getName(),
+                        {accessor, CanonPath::root},
+                        ContentAddressMethod::Raw::NixArchive,
+                        HashAlgorithm::SHA256,
+                        {},
+                        filter);
+                }
             }
         }
 
@@ -399,7 +435,12 @@ struct MercurialInputScheme : InputScheme
 
         deletePath(tmpDir / ".hg_archival.txt");
 
-        auto storePath = store.addToStore(name, {makeFSSourceAccessor(tmpDir), CanonPath::root});
+        ref<SourceAccessor> archiveAccessor = makeFSSourceAccessor(tmpDir);
+
+        if (auto nixIgnoreFilter = readNixIgnore(archiveAccessor))
+            archiveAccessor = makeNixIgnoreSourceAccessor(archiveAccessor, std::move(*nixIgnoreFilter));
+
+        auto storePath = store.addToStore(name, {archiveAccessor, CanonPath::root});
 
         Attrs infoAttrs({
             {"revCount", (uint64_t) revCount},

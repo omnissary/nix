@@ -30,9 +30,15 @@ rooted at the repository, and a flake in a subdirectory is represented with
 unaffected by the policy. A working tree whose only modifications are excluded
 by the policy is not dirty.
 
-For path inputs every filesystem entry below the input root is a candidate. A
-flake inside a Mercurial or Jujutsu work tree is a path input rooted at the
-flake directory.
+For Mercurial inputs the candidates are the files Mercurial selects: the tracked
+files of the work tree, or those of the fetched revision. As with Git, a
+path-like reference to a directory inside a work tree is a Mercurial input
+rooted at the repository, `.hgignore` is not consulted, and a work tree whose
+only modifications are excluded by the policy is not dirty.
+
+For path inputs every filesystem entry below the input root is a candidate.
+Jujutsu work trees have no fetcher of their own, so a flake inside one is a path
+input rooted at the flake directory.
 
 Every source applies its own policy. When Git submodules are enabled, a
 submodule's own `.nixignore` governs its contents, and the superproject's policy

@@ -233,25 +233,49 @@ superSource=$(nix flake prefetch --refresh --json \
     "git+file://$superRepo?ref=master&submodules=1" | jq -r .storePath)
 test ! -e "$superSource/deps/sub"
 
-# Only a Git root widens a shorthand reference to the whole repository. A flake
-# inside a Mercurial or Jujutsu work tree is a path source rooted at the flake
-# directory, so the policy is read from there.
+# A Git or Mercurial root widens a shorthand reference to the whole repository,
+# so the policy is read from the repository root. Jujutsu has no fetcher, so a
+# flake in a Jujutsu work tree is a path source rooted at the flake directory.
 hgRoot=$TEST_ROOT/nixignore-hg
 if [[ -n $(type -p hg) ]]; then
-    mkdir -p "$hgRoot/sub" "$hgRoot/hidden"
+    mkdir -p "$hgRoot/sub"
     hg init "$hgRoot"
+    echo '{ outputs = _: {}; }' > "$hgRoot/flake.nix"
     echo '{ outputs = _: {}; }' > "$hgRoot/sub/flake.nix"
-    echo hidden > "$hgRoot/hidden/value"
-    echo /dropped > "$hgRoot/sub/.nixignore"
-    echo dropped > "$hgRoot/sub/dropped"
-    echo kept > "$hgRoot/sub/kept"
+    echo /dropped > "$hgRoot/.nixignore"
+    echo dropped > "$hgRoot/dropped"
+    echo kept > "$hgRoot/kept"
+    hg add "$hgRoot/.nixignore" "$hgRoot/dropped" "$hgRoot/kept" "$hgRoot/flake.nix" "$hgRoot/sub/flake.nix"
+    hg commit --config ui.username=foobar@example.org "$hgRoot" -m 'Initial commit'
+    echo untracked > "$hgRoot/untracked"
+
     hgMetadata=$(nix flake metadata --refresh --json "$hgRoot/sub")
-    hgSource=$(nix flake prefetch --refresh --json "$hgRoot/sub" | jq -r .storePath)
-    [[ $(jq -r .locked.type <<< "$hgMetadata") = path ]]
-    [[ $(jq -r '.locked.dir // "none"' <<< "$hgMetadata") = none ]]
+    [[ $(jq -r .locked.type <<< "$hgMetadata") = hg ]]
+    [[ $(jq -r .locked.dir <<< "$hgMetadata") = sub ]]
+
+    hgSource=$(nix flake prefetch --refresh --json "hg+file://$hgRoot" | jq -r .storePath)
     test -e "$hgSource/kept"
+    test -e "$hgSource/.nixignore"
     test ! -e "$hgSource/dropped"
-    test ! -e "$hgSource/hidden"
+    test ! -e "$hgSource/untracked"
+    test ! -e "$hgSource/.hg"
+
+    # A work tree whose only modifications are excluded is not dirty.
+    echo changed > "$hgRoot/dropped"
+    nix flake metadata --refresh --json "hg+file://$hgRoot" | jq -e -r .revision
+
+    # An unclean work tree copies the tracked files the policy keeps.
+    echo changed > "$hgRoot/kept"
+    hgDirty=$(_NIX_TEST_BARF_ON_UNCACHEABLE='' nix flake prefetch --refresh --json "hg+file://$hgRoot" | jq -r .storePath)
+    [[ $(cat "$hgDirty/kept") = changed ]]
+    test ! -e "$hgDirty/dropped"
+    test ! -e "$hgDirty/untracked"
+
+    # An untracked policy file is not part of a Mercurial input, so it is not read.
+    hg forget -R "$hgRoot" "$hgRoot/.nixignore"
+    hgForgotten=$(_NIX_TEST_BARF_ON_UNCACHEABLE='' nix flake prefetch --refresh --json "hg+file://$hgRoot" | jq -r .storePath)
+    test -e "$hgForgotten/dropped"
+    test ! -e "$hgForgotten/.nixignore"
 fi
 
 jjRoot=$TEST_ROOT/nixignore-jj
